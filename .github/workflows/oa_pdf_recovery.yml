@@ -1,0 +1,93 @@
+name: OA PDF recovery
+
+on:
+  push:
+    branches:
+      - oa-pdf-recovery-20260811
+    paths:
+      - "oa_recovery/**"
+      - ".github/workflows/oa_pdf_recovery.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    name: Recover public PDFs (${{ matrix.year }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        year: [2024, 2025, 2026]
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      OA_CONTACT_EMAIL: "oa-recovery@users.noreply.github.com"
+    steps:
+      - name: Checkout temporary branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify retrieval payload
+        run: |
+          cat oa_recovery/payload.b64.* | base64 -d > /tmp/oa_recovery_payload.tar.gz
+          tar -xzf /tmp/oa_recovery_payload.tar.gz -C .
+          python -m py_compile oa_recovery/oa_recover.py
+          python - <<'PY'
+          import json
+          with open("oa_recovery/papers.json", encoding="utf-8") as handle:
+              rows = json.load(handle)
+          assert len(rows) == 504, f"expected 504 records, got {len(rows)}"
+          assert sorted({row["year"] for row in rows}) == [2024, 2025, 2026]
+          print(f"payload verified: {len(rows)} records")
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install retrieval dependencies
+        run: >-
+          python -m pip install
+          requests beautifulsoup4 lxml rapidfuzz pymupdf
+
+      - name: Retrieve and validate public PDFs
+        id: recover
+        run: >-
+          python oa_recovery/oa_recover.py
+          --input oa_recovery/papers.json
+          --output output
+          --year ${{ matrix.year }}
+          --workers 5
+
+      - name: Show compact result summary
+        if: always()
+        run: |
+          echo "year=${{ matrix.year }}"
+          find output -maxdepth 3 -type f -printf '%p %s bytes\n' | sort | tail -n 80 || true
+          if [ -f output/reports/summary.json ]; then
+            cat output/reports/summary.json
+          fi
+
+      - name: Upload verified PDFs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oa-pdfs-${{ matrix.year }}
+          path: output/pdfs/${{ matrix.year }}/**/*.pdf
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Upload retrieval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oa-report-${{ matrix.year }}
+          path: output/reports/**
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 6

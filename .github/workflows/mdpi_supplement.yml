@@ -1,0 +1,79 @@
+name: MDPI public PDF supplement
+
+on:
+  push:
+    branches:
+      - oa-pdf-recovery-20260811
+    paths:
+      - ".github/scripts/mdpi_supplement.py"
+      - ".github/workflows/mdpi_supplement.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover-mdpi:
+    name: Recover MDPI PDFs (${{ matrix.year }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        year: [2024, 2025, 2026]
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - name: Checkout temporary branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct paper list
+        run: |
+          cat oa_recovery/payload.b64.0{0..7} oa_recovery/payload.b64.08part{0,1} | base64 -d > /tmp/oa_recovery_payload.tar.gz
+          echo "db4cf92fc4886a96d9369b9ca4b05a637257902e7b467570724d2eb5620e5714  /tmp/oa_recovery_payload.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/oa_recovery_payload.tar.gz -C .
+          python -m py_compile .github/scripts/mdpi_supplement.py
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install requests rapidfuzz pymupdf
+
+      - name: Retrieve and validate official MDPI PDFs
+        run: >-
+          python .github/scripts/mdpi_supplement.py
+          --input oa_recovery/papers.json
+          --output mdpi_output
+          --year ${{ matrix.year }}
+          --workers 8
+
+      - name: Show summary
+        if: always()
+        run: |
+          cat mdpi_output/reports/summary.json || true
+          find mdpi_output -type f -printf '%p %s bytes\n' | tail -n 40 || true
+
+      - name: Upload verified MDPI PDFs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oa-mdpi-pdfs-${{ matrix.year }}
+          path: mdpi_output/pdfs/${{ matrix.year }}/**/*.pdf
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+
+      - name: Upload MDPI report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oa-mdpi-report-${{ matrix.year }}
+          path: mdpi_output/reports/**
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 6

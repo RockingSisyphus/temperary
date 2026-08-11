@@ -1,0 +1,57 @@
+name: MDPI precise retry
+
+on:
+  push:
+    branches:
+      - oa-pdf-recovery-20260811
+    paths:
+      - ".github/scripts/mdpi_retry.py"
+      - ".github/workflows/mdpi_retry.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct paper list
+        run: |
+          cat oa_recovery/payload.b64.0{0..7} oa_recovery/payload.b64.08part{0,1} | base64 -d > /tmp/oa_recovery_payload.tar.gz
+          echo "db4cf92fc4886a96d9369b9ca4b05a637257902e7b467570724d2eb5620e5714  /tmp/oa_recovery_payload.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/oa_recovery_payload.tar.gz -C .
+          python -m py_compile .github/scripts/mdpi_retry.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install requests beautifulsoup4 rapidfuzz pymupdf
+      - name: Retry seven MDPI records
+        run: python .github/scripts/mdpi_retry.py
+      - name: Show summary
+        if: always()
+        run: cat mdpi_retry_output/reports/summary.json || true
+      - name: Upload verified PDFs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oa-mdpi-retry-pdfs
+          path: mdpi_retry_output/pdfs/*.pdf
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oa-mdpi-retry-report
+          path: mdpi_retry_output/reports/**
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 6

@@ -32,7 +32,8 @@ jobs:
 
       - name: Reconstruct and verify retrieval payload
         run: |
-          cat oa_recovery/payload.b64.* | base64 -d > /tmp/oa_recovery_payload.tar.gz
+          cat oa_recovery/payload.b64.0{0..7} oa_recovery/payload.b64.08part{0,1} | base64 -d > /tmp/oa_recovery_payload.tar.gz
+          echo "db4cf92fc4886a96d9369b9ca4b05a637257902e7b467570724d2eb5620e5714  /tmp/oa_recovery_payload.tar.gz" | sha256sum -c -
           tar -xzf /tmp/oa_recovery_payload.tar.gz -C .
           python -m py_compile oa_recovery/oa_recover.py
           python - <<'PY'

@@ -1,0 +1,171 @@
+name: AgentWiki oversized page translation
+on:
+  push:
+    branches: [chatgpt-agentwiki-translate-20260905]
+    paths: [.github/workflows/agentwiki-hotpage.yml]
+permissions: {contents: read}
+jobs:
+  hotpage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install and download
+        run: |
+          pip install 'argostranslate==1.9.6'
+          mkdir -p work output
+          curl -fL --retry 5 --retry-delay 3 https://collusion.wiki/explorer/download/revisions.jsonl.gz -o work/revisions.jsonl.gz
+          curl -fL --retry 5 --retry-delay 3 https://data.argosopentech.com/argospm/v1/translate-en_zh-1_9.argosmodel -o work/en_zh.argosmodel
+      - name: Translate page slice
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          python - <<'PY'
+          import difflib,gzip,json,os,re,hashlib
+          from pathlib import Path
+          import argostranslate.package,argostranslate.translate
+          S=int(os.environ['SHARD']);N=16;PID='dse/WillkommenImWiki'
+          argostranslate.package.install_from_path(Path('work/en_zh.argosmodel'))
+          tr=argostranslate.translate.get_translation_from_codes('en','zh')
+          url=re.compile(r'https?://[^\s<>\]\[)]+'); handle=re.compile(r'\b(?:OpenAI|OAI|Agent)[A-Za-z0-9_.:-]{2,}\b'); code=re.compile(r'^(?:\s*[{}\[\]<>`]|\s*(?:GET|POST|curl|wget|python|pip|ssh|http|https)\b)',re.I)
+          def units(text,m=500):
+            out=[]
+            for p in re.split(r'(\n\s*\n|\n)',text):
+              if not p:continue
+              if p.startswith('\n'):out.append(p);continue
+              while len(p)>m:
+                k=max(p.rfind('. ',0,m),p.rfind('? ',0,m),p.rfind('! ',0,m),p.rfind(' ',0,m)); k=k if k>=80 else m
+                out.append(p[:k+1]);p=p[k+1:].lstrip()
+              if p:out.append(p)
+            return out
+          cache={}
+          def tl(text):
+            if not (text or '').strip():return text or ''
+            h=hashlib.sha256(text.encode()).hexdigest()
+            if h in cache:return cache[h]
+            rr=[]
+            for u in units(text):
+              if u.startswith('\n'):rr.append(u);continue
+              t=u.strip();letters=sum(c.isalpha() for c in t)
+              if code.search(t) or letters<3 or letters<max(3,len(t)*.12):rr.append(u);continue
+              keep=[]
+              def rp(m):keep.append(m.group());return f'ZXQKEEP{len(keep)-1}QXZ'
+              p=handle.sub(rp,url.sub(rp,u))
+              try:z=tr.translate(p)
+              except Exception:z=u
+              for i,v in enumerate(keep):z=z.replace(f'ZXQKEEP{i}QXZ',v).replace(f'ZXQKEEP{i} QXZ',v)
+              rr.append(z)
+            cache[h]=''.join(rr);return cache[h]
+          rs=[]
+          with gzip.open('work/revisions.jsonl.gz','rt',encoding='utf-8') as f:
+            for line in f:
+              r=json.loads(line)
+              if r.get('page_id')==PID:rs.append(r)
+          rs.sort(key=lambda r:(r.get('seq') or 0,r.get('time') or ''))
+          ph=re.compile(r'^\s*(?:describe the new page here\.?|beschreibe hier die neue seite\.?|created|deletedpage)\s*$',re.I)
+          rows=[r for r in rs if (r.get('body') or '').strip() and not ph.match((r.get('body') or '').strip())]
+          def delta(old,new):
+            a=(old or '').splitlines();b=(new or '').splitlines();sm=difflib.SequenceMatcher(None,a,b,autojunk=False);add=[]
+            for tag,i1,i2,j1,j2 in sm.get_opcodes():
+              if tag in ('insert','replace') and j1<j2:add.extend(b[j1:j2])
+            x='\n'.join(add).strip();return x if x else (new.strip() if old!=new else '')
+          rec={'page_id':PID,'slice':S,'opening':None,'updates':[]}
+          if S==0 and rows:
+            rec['opening']={'rev_id':rows[0].get('rev_id'),'body_zh':tl(rows[0].get('body') or '')}
+          prev=rows[0] if rows else None
+          for idx,r in enumerate(rows[1:],1):
+            x=delta(prev.get('body') or '',r.get('body') or '')
+            if idx%N==S and x:rec['updates'].append({'rev_id':r.get('rev_id'),'text_zh':tl(x)})
+            prev=r
+          with gzip.open(f'output/hotpage-{S:02d}.jsonl.gz','wt',encoding='utf-8') as w:w.write(json.dumps(rec,ensure_ascii=False,separators=(',',':'))+'\n')
+          print('DONE',S,len(rec['updates']))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentwiki-hotpage-${{ matrix.shard }}
+          path: output/
+          compression-level: 0
+          retention-days: 1
+  shard2rest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install and download
+        run: |
+          pip install 'argostranslate==1.9.6'
+          mkdir -p work output
+          curl -fL --retry 5 --retry-delay 3 https://collusion.wiki/explorer/download/revisions.jsonl.gz -o work/revisions.jsonl.gz
+          curl -fL --retry 5 --retry-delay 3 https://data.argosopentech.com/argospm/v1/translate-en_zh-1_9.argosmodel -o work/en_zh.argosmodel
+      - name: Translate shard 2 remainder
+        run: |
+          python - <<'PY'
+          import difflib,gzip,hashlib,json,re,zlib
+          from collections import defaultdict
+          from pathlib import Path
+          import argostranslate.package,argostranslate.translate
+          argostranslate.package.install_from_path(Path('work/en_zh.argosmodel'));tr=argostranslate.translate.get_translation_from_codes('en','zh')
+          url=re.compile(r'https?://[^\s<>\]\[)]+');handle=re.compile(r'\b(?:OpenAI|OAI|Agent)[A-Za-z0-9_.:-]{2,}\b');code=re.compile(r'^(?:\s*[{}\[\]<>`]|\s*(?:GET|POST|curl|wget|python|pip|ssh|http|https)\b)',re.I);ph=re.compile(r'^\s*(?:describe the new page here\.?|beschreibe hier die neue seite\.?|created|deletedpage)\s*$',re.I)
+          def units(text,m=500):
+            out=[]
+            for p in re.split(r'(\n\s*\n|\n)',text):
+              if not p:continue
+              if p.startswith('\n'):out.append(p);continue
+              while len(p)>m:
+                k=max(p.rfind('. ',0,m),p.rfind('? ',0,m),p.rfind('! ',0,m),p.rfind(' ',0,m));k=k if k>=80 else m;out.append(p[:k+1]);p=p[k+1:].lstrip()
+              if p:out.append(p)
+            return out
+          cache={}
+          def tl(text):
+            if not (text or '').strip():return text or ''
+            h=hashlib.sha256(text.encode()).hexdigest()
+            if h in cache:return cache[h]
+            rr=[]
+            for u in units(text):
+              if u.startswith('\n'):rr.append(u);continue
+              t=u.strip();letters=sum(c.isalpha() for c in t)
+              if code.search(t) or letters<3 or letters<max(3,len(t)*.12):rr.append(u);continue
+              keep=[]
+              def rp(m):keep.append(m.group());return f'ZXQKEEP{len(keep)-1}QXZ'
+              p=handle.sub(rp,url.sub(rp,u))
+              try:z=tr.translate(p)
+              except Exception:z=u
+              for i,v in enumerate(keep):z=z.replace(f'ZXQKEEP{i}QXZ',v).replace(f'ZXQKEEP{i} QXZ',v)
+              rr.append(z)
+            cache[h]=''.join(rr);return cache[h]
+          by=defaultdict(list)
+          with gzip.open('work/revisions.jsonl.gz','rt',encoding='utf-8') as f:
+            for line in f:
+              r=json.loads(line);pid=r.get('page_id') or ''
+              if zlib.crc32(pid.encode())%16==2 and pid!='dse/WillkommenImWiki':by[pid].append(r)
+          with gzip.open('output/shard2rest.jsonl.gz','wt',encoding='utf-8') as w:
+            for pid,rs in by.items():
+              rs.sort(key=lambda r:(r.get('seq') or 0,r.get('time') or ''));rows=[r for r in rs if (r.get('body') or '').strip() and not ph.match((r.get('body') or '').strip())]
+              if not rows:continue
+              first=rows[0];rec={'page_id':pid,'title_en':first.get('name') or pid.split('/',1)[-1],'title_zh':tl(first.get('name') or pid.split('/',1)[-1]),'opening':{'rev_id':first.get('rev_id'),'body_zh':tl(first.get('body') or '')},'updates':[]};prev=first
+              for r in rows[1:]:
+                a=(prev.get('body') or '').splitlines();b=(r.get('body') or '').splitlines();sm=difflib.SequenceMatcher(None,a,b,autojunk=False);add=[]
+                for tag,i1,i2,j1,j2 in sm.get_opcodes():
+                  if tag in ('insert','replace') and j1<j2:add.extend(b[j1:j2])
+                x='\n'.join(add).strip()
+                if not x and (prev.get('body') or '')!=(r.get('body') or ''):x=(r.get('body') or '').strip()
+                if x:rec['updates'].append({'rev_id':r.get('rev_id'),'text_zh':tl(x)})
+                prev=r
+              w.write(json.dumps(rec,ensure_ascii=False,separators=(',',':'))+'\n')
+          print('DONE',len(by))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentwiki-shard2-rest
+          path: output/
+          compression-level: 0
+          retention-days: 1

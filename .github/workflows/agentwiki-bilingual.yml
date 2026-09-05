@@ -1,0 +1,118 @@
+name: AgentWiki bilingual translation
+on:
+  push:
+    branches: [chatgpt-agentwiki-translate-20260905]
+    paths: [.github/workflows/agentwiki-bilingual.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install translator
+        run: |
+          pip install 'argostranslate==1.9.6'
+          mkdir -p work output
+          curl -fL --retry 5 --retry-delay 3 https://collusion.wiki/explorer/download/revisions.jsonl.gz -o work/revisions.jsonl.gz
+          curl -fL --retry 5 --retry-delay 3 https://data.argosopentech.com/argospm/v1/translate-en_zh-1_9.argosmodel -o work/en_zh.argosmodel
+      - name: Translate shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          python - <<'PY'
+          import difflib,gzip,hashlib,json,os,re,time,zlib
+          from collections import defaultdict
+          from pathlib import Path
+          import argostranslate.package,argostranslate.translate
+          S=int(os.environ['SHARD']); N=16; W=Path('work'); O=Path('output'); O.mkdir(exist_ok=True)
+          argostranslate.package.install_from_path(W/'en_zh.argosmodel')
+          tr=argostranslate.translate.get_translation_from_codes('en','zh')
+          if tr is None: raise RuntimeError('en->zh unavailable')
+          ph=re.compile(r'^\s*(?:describe the new page here\.?|beschreibe hier die neue seite\.?|created|deletedpage)\s*$',re.I)
+          url=re.compile(r'https?://[^\s<>\]\[)]+'); email=re.compile(r'\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b'); handle=re.compile(r'\b(?:OpenAI|OAI|Agent)[A-Za-z0-9_.:-]{2,}\b')
+          code=re.compile(r'^(?:\s*[{}\[\]<>`]|\s*(?:GET|POST|curl|wget|python|pip|ssh|http|https)\b)',re.I)
+          pages=defaultdict(list)
+          with gzip.open(W/'revisions.jsonl.gz','rt',encoding='utf-8') as f:
+            for line in f:
+              r=json.loads(line); pid=r.get('page_id') or ''
+              if pid and zlib.crc32(pid.encode())%N==S: pages[pid].append(r)
+          for v in pages.values(): v.sort(key=lambda r:(r.get('seq') or 0,r.get('time') or ''))
+          cache={}
+          def units(text,m=500):
+            out=[]
+            for para in re.split(r'(\n\s*\n|\n)',text):
+              if not para: continue
+              if para.startswith('\n'): out.append(para); continue
+              while len(para)>m:
+                k=max(para.rfind('. ',0,m),para.rfind('? ',0,m),para.rfind('! ',0,m),para.rfind(' ',0,m))
+                if k<80:k=m
+                out.append(para[:k+1]); para=para[k+1:].lstrip()
+              if para: out.append(para)
+            return out
+          def translate(text):
+            text=text or ''
+            if not text.strip(): return text
+            h=hashlib.sha256(text.encode()).hexdigest()
+            if h in cache:return cache[h]
+            res=[]
+            for u in units(text):
+              if u.startswith('\n'):res.append(u);continue
+              t=u.strip(); letters=sum(c.isalpha() for c in t)
+              if not t or code.search(t) or letters<3 or letters<max(3,len(t)*.12):res.append(u);continue
+              keep=[]
+              def rp(m): keep.append(m.group(0)); return f'ZXQKEEP{len(keep)-1}QXZ'
+              p=u
+              for rx in (url,email,handle):p=rx.sub(rp,p)
+              try:z=tr.translate(p)
+              except Exception:z=u
+              for i,v in enumerate(keep):
+                z=z.replace(f'ZXQKEEP{i}QXZ',v).replace(f'ZXQKEEP{i} QXZ',v)
+              res.append(z)
+            cache[h]=''.join(res); return cache[h]
+          def added(old,new):
+            if not old:return new,'opening'
+            a=old.splitlines();b=new.splitlines();sm=difflib.SequenceMatcher(None,a,b,autojunk=False);add=[];dele=0;end=True
+            for tag,i1,i2,j1,j2 in sm.get_opcodes():
+              if tag in ('insert','replace'):
+                if j2<len(b):end=False
+                add.extend(b[j1:j2])
+              if tag in ('delete','replace'):dele+=i2-i1
+            x='\n'.join(add).strip()
+            if not x and old!=new:x=new.strip()
+            return x,('edit_rewrite' if dele else 'append_reply' if end else 'insert_content')
+          out=O/f'translations-{S:02d}.jsonl.gz'; st={'shard':S,'pages':0,'items':0,'chars':0,'start':time.time()}
+          with gzip.open(out,'wt',encoding='utf-8',compresslevel=6) as wf:
+            for pid in sorted(pages):
+              rows=[r for r in pages[pid] if (r.get('body') or '').strip() and not ph.match((r.get('body') or '').strip())]
+              if not rows:continue
+              first=rows[0]; title=first.get('name') or pid.split('/',1)[-1]; body=first.get('body') or ''
+              rec={'page_id':pid,'wiki':first.get('wiki'),'title_en':title,'title_zh':translate(title),'opening':{'rev_id':first.get('rev_id'),'agent':first.get('label') or '(blank)','time':first.get('time'),'body_en':body,'body_zh':translate(body)},'updates':[]}
+              st['items']+=1;st['chars']+=len(body);prev=first
+              for r in rows[1:]:
+                x,k=added(prev.get('body') or '',r.get('body') or '')
+                if x or (prev.get('body') or '')!=(r.get('body') or ''):
+                  rec['updates'].append({'rev_id':r.get('rev_id'),'agent':r.get('label') or '(blank)','time':r.get('time'),'kind':k,'text_en':x,'text_zh':translate(x)})
+                  st['items']+=1;st['chars']+=len(x)
+                prev=r
+              wf.write(json.dumps(rec,ensure_ascii=False,separators=(',',':'))+'\n');st['pages']+=1
+              if st['pages']%25==0: print('PROGRESS',S,st['pages'],st['items'],st['chars'],round(time.time()-st['start'],1),flush=True)
+          st['elapsed_s']=round(time.time()-st.pop('start'),1);(O/f'stats-{S:02d}.json').write_text(json.dumps(st,ensure_ascii=False,indent=2));print('DONE',json.dumps(st),flush=True)
+          PY
+      - name: Upload shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentwiki-bilingual-${{ matrix.shard }}
+          path: output/
+          compression-level: 0
+          retention-days: 1

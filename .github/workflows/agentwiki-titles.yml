@@ -1,0 +1,62 @@
+name: AgentWiki title translation
+on:
+  push:
+    branches: [chatgpt-agentwiki-translate-20260905]
+    paths: [.github/workflows/agentwiki-titles.yml]
+permissions:
+  contents: read
+jobs:
+  titles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Install and download
+        run: |
+          pip install 'argostranslate==1.9.6'
+          mkdir -p work output
+          curl -fL --retry 5 --retry-delay 3 https://collusion.wiki/explorer/download/pages.jsonl.gz -o work/pages.jsonl.gz
+          curl -fL --retry 5 --retry-delay 3 https://data.argosopentech.com/argospm/v1/translate-en_zh-1_9.argosmodel -o work/en_zh.argosmodel
+      - name: Translate titles
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          python - <<'PY'
+          import gzip,json,os,re,zlib
+          from pathlib import Path
+          import argostranslate.package,argostranslate.translate
+          S=int(os.environ['SHARD']);N=4
+          argostranslate.package.install_from_path(Path('work/en_zh.argosmodel'))
+          tr=argostranslate.translate.get_translation_from_codes('en','zh')
+          def split_title(s):
+            s=s.replace('_',' ').replace('-',' ').replace('/',' ')
+            s=re.sub(r'([a-z0-9])([A-Z])',r'\1 \2',s)
+            s=re.sub(r'([A-Z]+)([A-Z][a-z])',r'\1 \2',s)
+            s=re.sub(r'([A-Za-z])([0-9])',r'\1 \2',s)
+            s=re.sub(r'([0-9])([A-Za-z])',r'\1 \2',s)
+            return re.sub(r'\s+',' ',s).strip()
+          out=[]
+          with gzip.open('work/pages.jsonl.gz','rt',encoding='utf-8') as f:
+            for line in f:
+              p=json.loads(line); pid=p.get('page_id') or ''
+              if not pid or zlib.crc32(pid.encode())%N!=S:continue
+              raw=p.get('name') or pid.split('/',1)[-1]; spaced=split_title(raw)
+              try:zh=tr.translate(spaced) if any(c.isalpha() for c in spaced) else spaced
+              except Exception:zh=spaced
+              out.append({'page_id':pid,'title_en':raw,'title_spaced':spaced,'title_zh':zh})
+          with gzip.open(f'output/titles-{S:02d}.jsonl.gz','wt',encoding='utf-8') as w:
+            for r in out:w.write(json.dumps(r,ensure_ascii=False,separators=(',',':'))+'\n')
+          print('DONE',S,len(out))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentwiki-titles-${{ matrix.shard }}
+          path: output/
+          compression-level: 0
+          retention-days: 1

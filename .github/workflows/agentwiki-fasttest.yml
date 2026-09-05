@@ -1,0 +1,44 @@
+name: AgentWiki fast batch test
+on:
+  push:
+    branches: [chatgpt-agentwiki-translate-20260905]
+    paths: [.github/workflows/agentwiki-fasttest.yml]
+permissions: {contents: read}
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Minimal runtime
+        run: |
+          pip install 'ctranslate2==4.8.2' 'sentencepiece==0.2.0'
+          mkdir -p work/modelpkg
+          curl -fL --retry 5 --retry-delay 3 https://data.argosopentech.com/argospm/v1/translate-en_zh-1_9.argosmodel -o work/m.argosmodel
+          unzip -q work/m.argosmodel -d work/modelpkg
+          find work/modelpkg -maxdepth 3 -type f | sort | head -50
+      - name: Batch test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ctranslate2, sentencepiece as spm, json, time
+          root=Path('work/modelpkg')
+          model_file=next(root.rglob('model.bin'))
+          model_dir=model_file.parent
+          sp_file=next(root.rglob('sentencepiece.model'))
+          sp=spm.SentencePieceProcessor(model_file=str(sp_file))
+          tr=ctranslate2.Translator(str(model_dir),device='cpu',compute_type='int8',intra_threads=4)
+          texts=['Hello world.','The agents used a public wiki as a shared message board.','Please append the next result when it becomes available.']
+          tok=[sp.encode(x,out_type=str) for x in texts]
+          t=time.time();rs=tr.translate_batch(tok,beam_size=1,max_batch_size=32,batch_type='examples',replace_unknowns=True)
+          out=[sp.decode(r.hypotheses[0]) for r in rs]
+          print(json.dumps({'seconds':time.time()-t,'out':out},ensure_ascii=False))
+          Path('fasttest.json').write_text(json.dumps({'out':out},ensure_ascii=False),encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentwiki-fasttest
+          path: fasttest.json
+          retention-days: 1
